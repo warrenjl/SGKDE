@@ -1,0 +1,224 @@
+##################
+#Packages
+##################
+library(truncdist)
+
+#######################
+#Simulating Test Data
+#######################
+set.seed(21)
+y_h<-rnorm(n = 50,
+           mean = 0.00,
+           sd = 1.00)
+y_c<-rnorm(n = 50,
+           mean = 2.00,
+           sd = 1.00)
+
+###################################################
+###################################################
+#HISTORICAL DATA ANALYSIS:
+#Requires:  y_h:  Vector of historical outcome data
+###################################################
+###################################################
+n_h<-length(y_h)
+
+#######################################################################
+#Gibbs Sampling for Historical Data
+#######################################################################
+mcmc_samples<-110000
+
+#Parameter Vectors
+mu_h_ppd<-rep(NA,
+              times = mcmc_samples)
+sigma2_h_ppd<-rep(NA,
+                  times = mcmc_samples)
+
+#Initial Values
+mu_h_ppd[1]<-mean(y_h)
+sigma2_h_ppd[1]<-var(y_h)
+
+#Main Sampling Loop
+for(i in 2:mcmc_samples){
+   
+   #mu_h Update
+   mu_h_ppd[i]<-rnorm(n = 1,
+                      mean = mean(y_h),
+                      sd = sqrt(sigma2_h_ppd[i-1]/n_h))
+
+   #sigma2_h Update
+   sigma2_h_ppd[i]<-1.00/rgamma(n = 1,
+                                shape = (n_h/2.00),
+                                rate = sum((y_h - mu_h_ppd[i])^2)/2.00)
+   
+   }    
+
+burnin<-10000
+thin<-100
+keep_set<-seq((burnin + 1),
+              mcmc_samples,
+              thin)
+m<-length(keep_set)      
+mu_h_ppd<-mu_h_ppd[keep_set]
+sigma2_h_ppd<-sigma2_h_ppd[keep_set]
+
+####################################
+#Kernel Density Bandwidth Estimation
+####################################
+h_mu<-bw.SJ(mu_h_ppd) 
+h_sigma2<-bw.SJ(log(sigma2_h_ppd)) 
+
+################################################
+################################################
+#CURRENT DATA ANALYSIS:
+#Requires:  y_c:  Vector of current outcome data
+################################################
+################################################
+n_c<-length(y_c)
+
+#####################################################################################################################################
+#MCMC Sampling for Current Data
+#####################################################################################################################################
+mcmc_samples<-11000
+
+#Parameter Vectors
+mu_c_ppd<-rep(NA,
+              times = mcmc_samples)
+alpha_mu_ppd<-rep(NA,
+                  times = mcmc_samples)
+sigma2_c_ppd<-rep(NA,
+                  times = mcmc_samples)
+alpha_sigma2_ppd<-rep(NA,
+                      times = mcmc_samples)
+
+#Initial Values
+mu_c_ppd[1]<-mean(y_c)
+z_mu<-sample(c(1:m),
+             size = 1)
+alpha_mu_ppd[1]<-0.0001
+
+sigma2_c_ppd[1]<-var(y_c)
+z_sigma2<-sample(c(1:m),
+                 size = 1)
+alpha_sigma2_ppd[1]<-0.0001
+
+probs<-rep(NA,
+           times = m)
+   
+#Truncated Gamma Prior Distribution
+#(Note: a=1, b=0 is the Uniform(0,1) distribution)
+a<-1.00
+b<-0.00
+
+#Metropolis Settings
+acctot_sigma2<-1
+metrop_sd_sigma2<-0.25
+
+#Main Sampling Loop
+for(i in 2:mcmc_samples){
+
+   #z_mu
+   log_vals<- -(alpha_mu_ppd[i-1]/(2.00*(h_mu^2)))*((mu_c_ppd[i-1] - mu_h_ppd)^2)
+   for(j in 1:m){
+      probs[j]<-1.00/sum(exp(log_vals - log_vals[j]))
+      }
+   z_mu<-sample(c(1:m),
+                prob = probs,
+                size = 1)
+
+   #z_sigma2
+   log_vals<- -(alpha_sigma2_ppd[i-1]/(2.00*(h_sigma2^2)))*((log(sigma2_c_ppd[i-1]/sigma2_h_ppd))^2)
+   for(j in 1:m){
+      probs[j]<-1.00/sum(exp(log_vals - log_vals[j]))
+      }
+   z_sigma2<-sample(c(1:m),
+                    prob = probs,
+                    size = 1)
+
+   #alpha_mu
+   alpha_mu_ppd[i]<-rtrunc(n = 1,
+                           spec = "gamma",
+                           a = 0.00,
+                           b = 1.00,
+                           shape = (0.50 + a),
+                           rate = (((mu_c_ppd[i-1] - mu_h_ppd[z_mu])^2)/(2.00*(h_mu^2)) + b))
+
+   #alpha_sigma2
+   alpha_sigma2_ppd[i]<-rtrunc(n = 1,
+                               spec = "gamma",
+                               a = 0.00,
+                               b = 1.00,
+                               shape = (0.50 + a),
+                               rate = (((log(sigma2_c_ppd[i-1]/sigma2_h_ppd[z_sigma2]))^2)/(2.00*(h_sigma2^2)) + b))
+ 
+   #mu_c   
+   var_mu<-(sigma2_c_ppd[i-1]*(h_mu^2))/(n_c*(h_mu^2) + alpha_mu_ppd[i]*sigma2_c_ppd[i-1])
+   mean_mu<-((h_mu^2)*sum(y_c) + sigma2_c_ppd[i-1]*mu_h_ppd[z_mu]*alpha_mu_ppd[i])/(n_c*(h_mu^2) + alpha_mu_ppd[i]*sigma2_c_ppd[i-1])
+   mu_c_ppd[i]<-rnorm(n = 1,
+                      mean = mean_mu,
+                      sd = sqrt(var_mu))
+ 
+   #sigma2_c
+   second<- -0.50*n_c*log(sigma2_c_ppd[i-1]) +
+            -sum((y_c - mu_c_ppd[i])^2)/(2.00*sigma2_c_ppd[i-1]) +
+            -(alpha_sigma2_ppd[i]/(2.00*(h_sigma2)^2))*((log(sigma2_c_ppd[i-1]/sigma2_h_ppd[z_sigma2]))^2)
+
+   sigma2_c_ppd[i]<-exp(rnorm(n = 1,
+                              mean = log(sigma2_c_ppd[i-1]),
+                              sd = metrop_sd_sigma2))
+   first<- -0.50*n_c*log(sigma2_c_ppd[i]) +
+           -sum((y_c - mu_c_ppd[i])^2)/(2.00*sigma2_c_ppd[i]) +
+           -(alpha_sigma2_ppd[i]/(2.00*(h_sigma2)^2))*((log(sigma2_c_ppd[i]/sigma2_h_ppd[z_sigma2]))^2)
+
+   acc<-1
+   ratio<-exp(first -
+              second)
+   if(ratio < runif(n = 1, 
+                    min = 0.00, 
+                    max = 1.00)){
+  
+     sigma2_c_ppd[i]<-sigma2_c_ppd[i-1]
+     acc<-0
+
+     }
+
+   acctot_sigma2<-acctot_sigma2 + 
+                  acc
+   
+   #Printing to the Screen
+   print(round(100*acctot_sigma2/i, 2)) 
+   print(round(100*(i/mcmc_samples), 2))
+
+   }
+
+burnin<-1000
+thin<-10
+keep_set<-seq((burnin + 1),
+              mcmc_samples,
+              thin)
+mu_c_ppd<-mu_c_ppd[keep_set]
+alpha_mu_ppd<-alpha_mu_ppd[keep_set]
+sigma2_c_ppd<-sigma2_c_ppd[keep_set]
+alpha_sigma2_ppd<-alpha_sigma2_ppd[keep_set]
+
+##############################################
+##############################################
+#FINAL INFERENCE
+##############################################
+##############################################
+mu_c_post_mean<-mean(mu_c_ppd)
+mu_c_cri<-quantile(mu_c_ppd,
+                   c(0.025, 0.975))
+
+alpha_mu_post_mean<-mean(alpha_mu_ppd)
+alpha_mu_cri<-quantile(alpha_mu_ppd,
+                       c(0.025, 0.975))
+
+sigma2_c_post_mean<-mean(sigma2_c_ppd)
+sigma2_c_cri<-quantile(sigma2_c_ppd,
+                       c(0.025, 0.975))
+
+alpha_sigma2_post_mean<-mean(alpha_sigma2_ppd)
+alpha_sigma2_cri<-quantile(alpha_sigma2_ppd,
+                           c(0.025, 0.975))
+
+   
